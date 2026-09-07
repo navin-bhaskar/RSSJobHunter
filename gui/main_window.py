@@ -2,14 +2,16 @@
 Main Application Window for RSS Job Hunter with Menu Bar (Settings -> RSS Feeds).
 """
 
+import html
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QDialog,
@@ -45,6 +47,9 @@ from database import (
 )
 from tools import fetch_rss_feed, get_universal_id
 from gui.rss_feed_dialog import RSSFeedDialog
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def check_pipeline_prerequisites() -> Optional[str]:
@@ -201,16 +206,19 @@ class MainWindow(QMainWindow):
     """Main Dashboard Window for RSS Job Hunter."""
 
     SCORE_COLORS = {
-        "strong": QColor("#2e7d32"),   # 80-100
-        "good": QColor("#f9a825"),     # 65-79
-        "moderate": QColor("#ef6c00"), # 50-64
-        "low": QColor("#c62828"),      # 0-49
+        "strong": (QColor("#2e7d32"), QColor("#ffffff")),    # 80-100, white on green
+        "good": (QColor("#f9a825"), QColor("#1a1a1a")),       # 65-79, dark text on amber (contrast fix)
+        "moderate": (QColor("#ef6c00"), QColor("#ffffff")),   # 50-64, white on orange
+        "low": (QColor("#c62828"), QColor("#ffffff")),        # 0-49, white on red
     }
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RSS Job Hunter - Dashboard")
         self.resize(1150, 700)
+
+        self._run_log: List[str] = []
+        self._initial_sort_applied = False
 
         # Initialize DB
         init_db()
@@ -230,10 +238,10 @@ class MainWindow(QMainWindow):
         # --- FILE MENU ---
         file_menu = menu_bar.addMenu("&File")
 
-        find_jobs_action = QAction("&Find Jobs", self)
-        find_jobs_action.setShortcut("Ctrl+R")
-        find_jobs_action.triggered.connect(self.find_jobs)
-        file_menu.addAction(find_jobs_action)
+        self.find_jobs_action = QAction("&Find Jobs", self)
+        self.find_jobs_action.setShortcut("Ctrl+R")
+        self.find_jobs_action.triggered.connect(self.find_jobs)
+        file_menu.addAction(self.find_jobs_action)
 
         file_menu.addSeparator()
 
@@ -365,8 +373,8 @@ class MainWindow(QMainWindow):
         dialog = RSSFeedDialog(self)
         dialog.exec()
 
-    def _score_band_color(self, score: int) -> Optional[QColor]:
-        """Returns the background color for a match score, matching matcher_agent's fit_level bands."""
+    def _score_band_colors(self, score: int) -> tuple[QColor, QColor]:
+        """Returns (background, foreground) colors for a match score, matching matcher_agent's fit_level bands."""
         if score >= 80:
             return self.SCORE_COLORS["strong"]
         if score >= 65:
@@ -402,9 +410,9 @@ class MainWindow(QMainWindow):
             score_item = QTableWidgetItem(str(score))
             score_item.setData(Qt.ItemDataRole.EditRole, score)
             if has_match:
-                color = self._score_band_color(score)
-                score_item.setBackground(color)
-                score_item.setForeground(QColor("#ffffff"))
+                bg, fg = self._score_band_colors(score)
+                score_item.setBackground(bg)
+                score_item.setForeground(fg)
 
             tailored_item = QTableWidgetItem("Yes" if is_tailored else "No")
 
@@ -424,6 +432,9 @@ class MainWindow(QMainWindow):
             self.jobs_table.setItem(row_idx, 5, source_item)
 
         self.jobs_table.setSortingEnabled(True)
+        if not self._initial_sort_applied:
+            self.jobs_table.sortItems(3, Qt.SortOrder.DescendingOrder)
+            self._initial_sort_applied = True
         self.status_bar.showMessage(f"Loaded {len(jobs)} job records.")
 
     def on_job_selected(self) -> None:
@@ -457,15 +468,15 @@ class MainWindow(QMainWindow):
                 skills = ", ".join(structured.get("required_skills") or [])
                 structured_html = (
                     f"<h3>AI-Extracted Details</h3>"
-                    f"<b>Title:</b> {structured.get('title', 'N/A')}<br>"
-                    f"<b>Company:</b> {structured.get('company', 'N/A')}<br>"
-                    f"<b>Location:</b> {structured.get('location', 'N/A')} "
+                    f"<b>Title:</b> {html.escape(str(structured.get('title', 'N/A')))}<br>"
+                    f"<b>Company:</b> {html.escape(str(structured.get('company', 'N/A')))}<br>"
+                    f"<b>Location:</b> {html.escape(str(structured.get('location', 'N/A')))} "
                     f"({'Remote' if structured.get('is_remote') else 'On-site'})<br>"
-                    f"<b>Employment Type:</b> {structured.get('employment_type', 'N/A')}<br>"
-                    f"<b>Experience Level:</b> {structured.get('experience_level', 'N/A')}<br>"
-                    f"<b>Salary:</b> {structured.get('salary_range') or 'N/A'}<br>"
-                    f"<b>Skills:</b> {skills or 'N/A'}<br>"
-                    f"<p><i>{structured.get('job_summary') or ''}</i></p>"
+                    f"<b>Employment Type:</b> {html.escape(str(structured.get('employment_type', 'N/A')))}<br>"
+                    f"<b>Experience Level:</b> {html.escape(str(structured.get('experience_level', 'N/A')))}<br>"
+                    f"<b>Salary:</b> {html.escape(str(structured.get('salary_range') or 'N/A'))}<br>"
+                    f"<b>Skills:</b> {html.escape(skills) if skills else 'N/A'}<br>"
+                    f"<p><i>{html.escape(str(structured.get('job_summary') or ''))}</i></p>"
                     f"<hr>"
                 )
             except Exception:
@@ -475,11 +486,11 @@ class MainWindow(QMainWindow):
             f"<b>Job Link:</b> <a href='{link}'>{link}</a><br>"
             f"<b>Status:</b> {job.get('status')}<br>"
             f"<b>Match Score:</b> {job.get('job_match_score')}<br>"
-            f"<b>RSS Source:</b> {source_str}<br>"
+            f"<b>RSS Source:</b> {html.escape(str(source_str)) if source_str else 'N/A'}<br>"
             f"<hr>"
             f"{structured_html}"
             f"<h3>Job Description</h3>"
-            f"<p>{job.get('job_description') or 'No description text provided.'}</p>"
+            f"<p>{html.escape(job.get('job_description') or 'No description text provided.')}</p>"
         )
         self.job_desc_browser.setHtml(content_html)
         self.view_report_btn.setEnabled(bool(job.get("match_result")))
@@ -538,39 +549,39 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         def _list_html(items: List[str]) -> str:
-            return "".join(f"<li>{i}</li>" for i in items) or "<li>None</li>"
+            return "".join(f"<li>{html.escape(str(i))}</li>" for i in items) or "<li>None</li>"
 
         exp_eval = match_result.get("experience_evaluation") or {}
-        html = (
-            f"<h2>{match_result.get('match_score')}/100 &mdash; {match_result.get('fit_level')}</h2>"
-            f"<p>{match_result.get('executive_summary', '')}</p>"
+        report_html = (
+            f"<h2>{match_result.get('match_score')}/100 &mdash; {html.escape(str(match_result.get('fit_level') or ''))}</h2>"
+            f"<p>{html.escape(str(match_result.get('executive_summary') or ''))}</p>"
             f"<h3>Matching Skills</h3><ul>{_list_html(match_result.get('matching_skills', []))}</ul>"
             f"<h3>Missing Skills</h3><ul>{_list_html(match_result.get('missing_skills', []))}</ul>"
             f"<h3>Key Strengths</h3><ul>{_list_html(match_result.get('key_strengths', []))}</ul>"
             f"<h3>Gap Areas</h3><ul>{_list_html(match_result.get('gap_areas', []))}</ul>"
             f"<h3>Tailoring Recommendations</h3><ul>{_list_html(match_result.get('tailoring_recommendations', []))}</ul>"
-            f"<h3>Experience Evaluation</h3><p>{exp_eval.get('commentary', '')}</p>"
+            f"<h3>Experience Evaluation</h3><p>{html.escape(str(exp_eval.get('commentary') or ''))}</p>"
         )
 
         if tailored_resume:
             skills = tailored_resume.get("skills") or {}
             work_exp_html = ""
             for exp in tailored_resume.get("work_experience", []):
-                bullets = "".join(f"<li>{r}</li>" for r in exp.get("responsibilities", []))
+                bullets = "".join(f"<li>{html.escape(str(r))}</li>" for r in exp.get("responsibilities", []))
                 work_exp_html += (
-                    f"<h4>{exp.get('job_title', '')} &mdash; {exp.get('company', '')}</h4>"
+                    f"<h4>{html.escape(str(exp.get('job_title') or ''))} &mdash; {html.escape(str(exp.get('company') or ''))}</h4>"
                     f"<ul>{bullets}</ul>"
                 )
-            html += (
+            report_html += (
                 f"<hr><h2>Tailored Resume</h2>"
-                f"<p><i>{tailored_resume.get('professional_summary', '')}</i></p>"
+                f"<p><i>{html.escape(str(tailored_resume.get('professional_summary') or ''))}</i></p>"
                 f"<h3>Emphasized Skills</h3>"
-                f"<p><b>Technical:</b> {', '.join(skills.get('technical_skills', []))}</p>"
+                f"<p><b>Technical:</b> {html.escape(', '.join(skills.get('technical_skills', [])))}</p>"
                 f"<h3>Work Experience</h3>{work_exp_html}"
             )
 
         browser = QTextBrowser()
-        browser.setHtml(html)
+        browser.setHtml(report_html)
         layout.addWidget(browser)
 
         close_btn = QPushButton("Close")
@@ -579,18 +590,29 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
+    def _on_worker_progress(self, message: str) -> None:
+        """Collects a Find Jobs progress message for the completion report, and shows it live."""
+        self._run_log.append(message)
+        self.status_bar.showMessage(message)
+
     def find_jobs(self) -> None:
         """Validates AI pipeline prerequisites, then starts the background Find Jobs worker."""
+        if getattr(self, "worker", None) is not None and self.worker.isRunning():
+            self.status_bar.showMessage("Find Jobs is already running — please wait for it to finish.")
+            return
+
         error = check_pipeline_prerequisites()
         if error:
             QMessageBox.critical(self, "Cannot Run Find Jobs", error)
             return
 
         self.find_jobs_btn.setEnabled(False)
+        self.find_jobs_action.setEnabled(False)
+        self._run_log = []
         self.status_bar.showMessage("Finding jobs: fetching, extracting, matching, and tailoring in background...")
 
         self.worker = FindJobsWorker()
-        self.worker.progress.connect(self.status_bar.showMessage)
+        self.worker.progress.connect(self._on_worker_progress)
         self.worker.finished.connect(self.on_find_jobs_finished)
         self.worker.start()
 
@@ -599,13 +621,21 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Handles background Find Jobs pipeline completion."""
         self.find_jobs_btn.setEnabled(True)
+        self.find_jobs_action.setEnabled(True)
         self.load_jobs()
         msg = (
             f"Find Jobs complete! Fetched: {total_fetched}, New: {total_new}, "
             f"Matched: {total_matched}, Tailored: {total_tailored}, Errors: {total_errors}."
         )
         self.status_bar.showMessage(msg)
-        QMessageBox.information(self, "Find Jobs Complete", msg)
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle("Find Jobs Complete")
+        msg_box.setText(msg)
+        if self._run_log:
+            msg_box.setDetailedText("\n".join(self._run_log))
+        msg_box.exec()
 
     def show_about_dialog(self) -> None:
         """Shows About dialog."""
@@ -635,5 +665,4 @@ def run_app():
 
 
 if __name__ == "__main__":
-    from PyQt6.QtWidgets import QApplication
     run_app()
