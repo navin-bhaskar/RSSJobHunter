@@ -38,6 +38,10 @@ def init_db(db_name: str = DB_NAME, schema_file: str = SCHEMA_FILE) -> None:
             cursor.execute("ALTER TABLE jobs ADD COLUMN universal_id TEXT;")
         if "structured_output" not in columns:
             cursor.execute("ALTER TABLE jobs ADD COLUMN structured_output TEXT;")
+        if "match_result" not in columns:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN match_result TEXT;")
+        if "tailored_resume" not in columns:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN tailored_resume TEXT;")
 
         conn.commit()
 
@@ -211,6 +215,26 @@ def update_job_structured_output(job_id: int, structured_output: str) -> bool:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(sql, (structured_output, job_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_job_match_result(job_id: int, match_result: str) -> bool:
+    """Updates only the match_result column (full ATSMatchResult JSON) for a job record."""
+    sql = "UPDATE jobs SET match_result = ? WHERE id = ?"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (match_result, job_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_job_tailored_resume(job_id: int, tailored_resume: str) -> bool:
+    """Updates only the tailored_resume column (full tailored ATSResumeSchema JSON) for a job record."""
+    sql = "UPDATE jobs SET tailored_resume = ? WHERE id = ?"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (tailored_resume, job_id))
         conn.commit()
         return cursor.rowcount > 0
 

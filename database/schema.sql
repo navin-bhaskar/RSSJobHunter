@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     application_link TEXT,
     rss_source_id INTEGER,
     structured_output TEXT,
+    match_result TEXT,
+    tailored_resume TEXT,
     FOREIGN KEY (rss_source_id) REFERENCES rss_sources(id) ON DELETE SET NULL
 );
 
