@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -45,113 +45,6 @@ from database import (
 )
 from tools import fetch_rss_feed, get_universal_id
 from gui.rss_feed_dialog import RSSFeedDialog
-
-
-class RSSFetchWorker(QThread):
-    """Worker thread for fetching RSS feeds in background without blocking GUI."""
-
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(int, int)  # total_fetched, total_new
-
-    def run(self) -> None:
-        sources = get_all_rss_sources()
-        if not sources:
-            self.progress.emit("No RSS sources configured. Please add one in Settings -> RSS Feeds.")
-            self.finished.emit(0, 0)
-            return
-
-        total_fetched = 0
-        total_new = 0
-
-        # Get existing job links/hashes for deduplication
-        existing_jobs = get_all_jobs()
-        existing_uids = {j.get("universal_id") for j in existing_jobs if j.get("universal_id")}
-        existing_links = {j.get("job_link") for j in existing_jobs if j.get("job_link")}
-
-        for source in sources:
-            source_id = source["id"]
-            source_name = source.get("name") or source.get("link")
-            self.progress.emit(f"Fetching RSS feed: {source_name}...")
-
-            try:
-                feed = fetch_rss_feed(source["link"], max_items=20)
-                items = feed.get("items", [])
-                total_fetched += len(items)
-
-                for item in items:
-                    link = item.get("link", "")
-                    uid = item.get("universal_id") or get_universal_id(link)
-
-                    if uid in existing_uids or link in existing_links:
-                        continue
-
-                    desc = item.get("summary") or item.get("content") or ""
-                    create_job(
-                        job_link=link,
-                        job_description=desc,
-                        status="pending",
-                        job_match_score=0,
-                        application_link=link,
-                        rss_source_id=source_id,
-                        universal_id=uid,
-                    )
-                    existing_uids.add(uid)
-                    existing_links.add(link)
-                    total_new += 1
-            except Exception as e:
-                self.progress.emit(f"Error fetching '{source_name}': {e}")
-
-        self.finished.emit(total_fetched, total_new)
-
-
-class EnrichJobWorker(QThread):
-    """Worker thread for running the LLM rss_agent to enrich a single job with structured data."""
-
-    finished = pyqtSignal(int, object, str)  # job_id, StructuredJobListingSchema or None, error message
-
-    def __init__(self, job: Dict[str, Any]):
-        super().__init__()
-        self.job = job
-
-    def run(self) -> None:
-        try:
-            from agents import RSSJobAgent
-
-            item = {
-                "title": "",
-                "link": self.job.get("job_link") or "",
-                "author": "",
-                "categories": [],
-                "summary": self.job.get("job_description") or "",
-            }
-            agent = RSSJobAgent()
-            structured = agent.process_feed_item(item, rss_source_id=self.job.get("rss_source_id"))
-            self.finished.emit(self.job["id"], structured, "")
-        except Exception as e:
-            self.finished.emit(self.job["id"], None, str(e))
-
-
-class MatchResumeWorker(QThread):
-    """Worker thread for parsing the candidate resume and running ATS matching against a job."""
-
-    finished = pyqtSignal(int, object, str)  # job_id, ATSMatchResult or None, error message
-
-    def __init__(self, job: Dict[str, Any]):
-        super().__init__()
-        self.job = job
-
-    def run(self) -> None:
-        try:
-            from agents import ResumeAgent, MatcherAgent
-
-            resume_schema, _from_cache = ResumeAgent().parse_resume()
-            result = MatcherAgent().evaluate_match(
-                resume_data=resume_schema,
-                job_description=self.job.get("job_description") or "",
-            )
-            self.finished.emit(self.job["id"], result, "")
-        except Exception as e:
-            self.finished.emit(self.job["id"], None, str(e))
 
 
 def check_pipeline_prerequisites() -> Optional[str]:
@@ -307,10 +200,17 @@ class FindJobsWorker(QThread):
 class MainWindow(QMainWindow):
     """Main Dashboard Window for RSS Job Hunter."""
 
+    SCORE_COLORS = {
+        "strong": QColor("#2e7d32"),   # 80-100
+        "good": QColor("#f9a825"),     # 65-79
+        "moderate": QColor("#ef6c00"), # 50-64
+        "low": QColor("#c62828"),      # 0-49
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RSS Job Hunter - Dashboard")
-        self.resize(1100, 700)
+        self.resize(1150, 700)
 
         # Initialize DB
         init_db()
@@ -330,10 +230,10 @@ class MainWindow(QMainWindow):
         # --- FILE MENU ---
         file_menu = menu_bar.addMenu("&File")
 
-        fetch_action = QAction("&Fetch All RSS Feeds", self)
-        fetch_action.setShortcut("Ctrl+R")
-        fetch_action.triggered.connect(self.fetch_all_rss_feeds)
-        file_menu.addAction(fetch_action)
+        find_jobs_action = QAction("&Find Jobs", self)
+        find_jobs_action.setShortcut("Ctrl+R")
+        find_jobs_action.triggered.connect(self.find_jobs)
+        file_menu.addAction(find_jobs_action)
 
         file_menu.addSeparator()
 
@@ -379,10 +279,10 @@ class MainWindow(QMainWindow):
         self.search_input.textChanged.connect(self.load_jobs)
         toolbar_layout.addWidget(self.search_input)
 
-        self.fetch_btn = QPushButton("⚡ Fetch RSS Feeds")
-        self.fetch_btn.setStyleSheet("font-weight: bold; padding: 6px 12px; background-color: #2b5c8f;")
-        self.fetch_btn.clicked.connect(self.fetch_all_rss_feeds)
-        toolbar_layout.addWidget(self.fetch_btn)
+        self.find_jobs_btn = QPushButton("🔎 Find Jobs")
+        self.find_jobs_btn.setStyleSheet("font-weight: bold; padding: 6px 12px; background-color: #2b5c8f;")
+        self.find_jobs_btn.clicked.connect(self.find_jobs)
+        toolbar_layout.addWidget(self.find_jobs_btn)
 
         self.settings_btn = QPushButton("⚙ Settings -> RSS Feeds")
         self.settings_btn.clicked.connect(self.open_rss_settings_dialog)
@@ -399,8 +299,10 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.jobs_table = QTableWidget()
-        self.jobs_table.setColumnCount(5)
-        self.jobs_table.setHorizontalHeaderLabels(["ID", "Job Link", "Status", "Match Score", "RSS Source"])
+        self.jobs_table.setColumnCount(6)
+        self.jobs_table.setHorizontalHeaderLabels(
+            ["ID", "Job Link", "Status", "Match Score", "Tailored", "RSS Source"]
+        )
         self.jobs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.jobs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.jobs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -428,16 +330,10 @@ class MainWindow(QMainWindow):
         job_info_layout.addWidget(self.job_desc_browser)
 
         ai_actions_layout = QHBoxLayout()
-        self.enrich_btn = QPushButton("🤖 Enrich with AI")
-        self.enrich_btn.setEnabled(False)
-        self.enrich_btn.clicked.connect(self.enrich_selected_job)
-        ai_actions_layout.addWidget(self.enrich_btn)
-
-        self.match_btn = QPushButton("🎯 Match Resume")
-        self.match_btn.setEnabled(False)
-        self.match_btn.clicked.connect(self.match_resume_for_selected_job)
-        ai_actions_layout.addWidget(self.match_btn)
-
+        self.view_report_btn = QPushButton("📄 View AI Report")
+        self.view_report_btn.setEnabled(False)
+        self.view_report_btn.clicked.connect(self.view_ai_report)
+        ai_actions_layout.addWidget(self.view_report_btn)
         ai_actions_layout.addStretch()
         job_info_layout.addLayout(ai_actions_layout)
 
@@ -460,7 +356,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(notes_group)
 
         splitter.addWidget(right_widget)
-        splitter.setSizes([600, 450])
+        splitter.setSizes([650, 450])
 
         layout.addWidget(splitter)
 
@@ -469,21 +365,48 @@ class MainWindow(QMainWindow):
         dialog = RSSFeedDialog(self)
         dialog.exec()
 
+    def _score_band_color(self, score: int) -> Optional[QColor]:
+        """Returns the background color for a match score, matching matcher_agent's fit_level bands."""
+        if score >= 80:
+            return self.SCORE_COLORS["strong"]
+        if score >= 65:
+            return self.SCORE_COLORS["good"]
+        if score >= 50:
+            return self.SCORE_COLORS["moderate"]
+        return self.SCORE_COLORS["low"]
+
     def load_jobs(self) -> None:
-        """Loads jobs from database into the table widget based on filters."""
+        """Loads jobs from database into the table widget, sorted by match score descending."""
         status = self.status_filter.currentText()
         search = self.search_input.text().strip()
 
         jobs = get_all_jobs(status_filter=status, search=search)
+        jobs.sort(key=lambda j: (j.get("job_match_score") or 0), reverse=True)
+
+        self.jobs_table.setSortingEnabled(False)
         self.jobs_table.setRowCount(len(jobs))
 
         rss_sources = {s["id"]: s.get("name") or s.get("link") for s in get_all_rss_sources()}
 
         for row_idx, job in enumerate(jobs):
+            score = job.get("job_match_score") or 0
+            has_match = bool(job.get("match_result"))
+            is_tailored = bool(job.get("tailored_resume"))
+
             id_item = QTableWidgetItem(str(job["id"]))
+            id_item.setData(Qt.ItemDataRole.EditRole, job["id"])
+
             link_item = QTableWidgetItem(job.get("job_link") or "")
             status_item = QTableWidgetItem(job.get("status") or "pending")
-            score_item = QTableWidgetItem(str(job.get("job_match_score", 0)))
+
+            score_item = QTableWidgetItem(str(score))
+            score_item.setData(Qt.ItemDataRole.EditRole, score)
+            if has_match:
+                color = self._score_band_color(score)
+                score_item.setBackground(color)
+                score_item.setForeground(QColor("#ffffff"))
+
+            tailored_item = QTableWidgetItem("Yes" if is_tailored else "No")
 
             source_name = rss_sources.get(job.get("rss_source_id"), "Direct / Manual")
             source_item = QTableWidgetItem(source_name)
@@ -491,13 +414,16 @@ class MainWindow(QMainWindow):
             id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            tailored_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             self.jobs_table.setItem(row_idx, 0, id_item)
             self.jobs_table.setItem(row_idx, 1, link_item)
             self.jobs_table.setItem(row_idx, 2, status_item)
             self.jobs_table.setItem(row_idx, 3, score_item)
-            self.jobs_table.setItem(row_idx, 4, source_item)
+            self.jobs_table.setItem(row_idx, 4, tailored_item)
+            self.jobs_table.setItem(row_idx, 5, source_item)
 
+        self.jobs_table.setSortingEnabled(True)
         self.status_bar.showMessage(f"Loaded {len(jobs)} job records.")
 
     def on_job_selected(self) -> None:
@@ -507,8 +433,7 @@ class MainWindow(QMainWindow):
             self.job_title_label.setText("Select a job from the table to view details")
             self.job_desc_browser.clear()
             self.notes_list.clear()
-            self.enrich_btn.setEnabled(False)
-            self.match_btn.setEnabled(False)
+            self.view_report_btn.setEnabled(False)
             return
 
         row = selected_ranges[0].topRow()
@@ -557,8 +482,7 @@ class MainWindow(QMainWindow):
             f"<p>{job.get('job_description') or 'No description text provided.'}</p>"
         )
         self.job_desc_browser.setHtml(content_html)
-        self.enrich_btn.setEnabled(True)
-        self.match_btn.setEnabled(True)
+        self.view_report_btn.setEnabled(bool(job.get("match_result")))
 
         # Populate Notes List
         self.notes_list.clear()
@@ -591,102 +515,61 @@ class MainWindow(QMainWindow):
         item = self.jobs_table.item(row, 0)
         return int(item.text()) if item else None
 
-    def _reselect_job(self, job_id: int) -> None:
-        """Re-selects a job row by ID after the table has been reloaded."""
-        for row in range(self.jobs_table.rowCount()):
-            item = self.jobs_table.item(row, 0)
-            if item and int(item.text()) == job_id:
-                self.jobs_table.selectRow(row)
-                break
-
-    def enrich_selected_job(self) -> None:
-        """Runs the LLM rss_agent on the selected job to extract structured details."""
+    def view_ai_report(self) -> None:
+        """Displays the stored ATS match breakdown and tailored resume for the selected job, read-only."""
         job_id = self._get_selected_job_id()
         if job_id is None:
             QMessageBox.warning(self, "Selection Error", "Please select a job first.")
             return
 
         job = get_job(job_id)
-        if not job:
+        if not job or not job.get("match_result"):
+            QMessageBox.information(
+                self, "No AI Report", "This job has not been analyzed yet. Run Find Jobs to process it."
+            )
             return
 
-        self.enrich_btn.setEnabled(False)
-        self.status_bar.showMessage("Enriching job with AI (this may take a moment)...")
+        match_result = json.loads(job["match_result"])
+        tailored_resume = json.loads(job["tailored_resume"]) if job.get("tailored_resume") else None
 
-        self.enrich_worker = EnrichJobWorker(job)
-        self.enrich_worker.finished.connect(self.on_enrich_finished)
-        self.enrich_worker.start()
-
-    def on_enrich_finished(self, job_id: int, structured: Any, error: str) -> None:
-        """Handles completion of the AI enrichment worker."""
-        self.enrich_btn.setEnabled(True)
-        if error:
-            QMessageBox.critical(self, "Enrichment Failed", f"Could not enrich job: {error}")
-            self.status_bar.showMessage("Enrichment failed.")
-            return
-
-        update_job_structured_output(job_id, structured.to_json())
-        self.status_bar.showMessage("Job enriched successfully.")
-        self.load_jobs()
-        self._reselect_job(job_id)
-
-    def match_resume_for_selected_job(self) -> None:
-        """Parses the candidate resume and runs an ATS match against the selected job."""
-        job_id = self._get_selected_job_id()
-        if job_id is None:
-            QMessageBox.warning(self, "Selection Error", "Please select a job first.")
-            return
-
-        job = get_job(job_id)
-        if not job:
-            return
-
-        if not (job.get("job_description") or "").strip():
-            QMessageBox.warning(self, "No Description", "This job has no description text to match against.")
-            return
-
-        self.match_btn.setEnabled(False)
-        self.status_bar.showMessage("Parsing resume & running ATS match (this may take a moment)...")
-
-        self.match_worker = MatchResumeWorker(job)
-        self.match_worker.finished.connect(self.on_match_finished)
-        self.match_worker.start()
-
-    def on_match_finished(self, job_id: int, result: Any, error: str) -> None:
-        """Handles completion of the ATS matching worker."""
-        self.match_btn.setEnabled(True)
-        if error:
-            QMessageBox.critical(self, "ATS Match Failed", f"Could not run ATS match: {error}")
-            self.status_bar.showMessage("ATS match failed.")
-            return
-
-        update_job_match_score(job_id, result.match_score)
-        self.status_bar.showMessage(f"ATS match complete: {result.match_score}/100 ({result.fit_level}).")
-        self.load_jobs()
-        self._reselect_job(job_id)
-        self._show_match_result_dialog(result)
-
-    def _show_match_result_dialog(self, result: Any) -> None:
-        """Displays a detailed ATS match result in a modal dialog."""
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"ATS Match Result: {result.match_score}/100 ({result.fit_level})")
-        dialog.setMinimumSize(600, 500)
+        dialog.setWindowTitle(f"AI Report: {match_result.get('match_score')}/100 ({match_result.get('fit_level')})")
+        dialog.setMinimumSize(650, 550)
         layout = QVBoxLayout(dialog)
 
         def _list_html(items: List[str]) -> str:
             return "".join(f"<li>{i}</li>" for i in items) or "<li>None</li>"
 
-        browser = QTextBrowser()
+        exp_eval = match_result.get("experience_evaluation") or {}
         html = (
-            f"<h2>{result.match_score}/100 &mdash; {result.fit_level}</h2>"
-            f"<p>{result.executive_summary}</p>"
-            f"<h3>Matching Skills</h3><ul>{_list_html(result.matching_skills)}</ul>"
-            f"<h3>Missing Skills</h3><ul>{_list_html(result.missing_skills)}</ul>"
-            f"<h3>Key Strengths</h3><ul>{_list_html(result.key_strengths)}</ul>"
-            f"<h3>Gap Areas</h3><ul>{_list_html(result.gap_areas)}</ul>"
-            f"<h3>Tailoring Recommendations</h3><ul>{_list_html(result.tailoring_recommendations)}</ul>"
-            f"<h3>Experience Evaluation</h3><p>{result.experience_evaluation.commentary}</p>"
+            f"<h2>{match_result.get('match_score')}/100 &mdash; {match_result.get('fit_level')}</h2>"
+            f"<p>{match_result.get('executive_summary', '')}</p>"
+            f"<h3>Matching Skills</h3><ul>{_list_html(match_result.get('matching_skills', []))}</ul>"
+            f"<h3>Missing Skills</h3><ul>{_list_html(match_result.get('missing_skills', []))}</ul>"
+            f"<h3>Key Strengths</h3><ul>{_list_html(match_result.get('key_strengths', []))}</ul>"
+            f"<h3>Gap Areas</h3><ul>{_list_html(match_result.get('gap_areas', []))}</ul>"
+            f"<h3>Tailoring Recommendations</h3><ul>{_list_html(match_result.get('tailoring_recommendations', []))}</ul>"
+            f"<h3>Experience Evaluation</h3><p>{exp_eval.get('commentary', '')}</p>"
         )
+
+        if tailored_resume:
+            skills = tailored_resume.get("skills") or {}
+            work_exp_html = ""
+            for exp in tailored_resume.get("work_experience", []):
+                bullets = "".join(f"<li>{r}</li>" for r in exp.get("responsibilities", []))
+                work_exp_html += (
+                    f"<h4>{exp.get('job_title', '')} &mdash; {exp.get('company', '')}</h4>"
+                    f"<ul>{bullets}</ul>"
+                )
+            html += (
+                f"<hr><h2>Tailored Resume</h2>"
+                f"<p><i>{tailored_resume.get('professional_summary', '')}</i></p>"
+                f"<h3>Emphasized Skills</h3>"
+                f"<p><b>Technical:</b> {', '.join(skills.get('technical_skills', []))}</p>"
+                f"<h3>Work Experience</h3>{work_exp_html}"
+            )
+
+        browser = QTextBrowser()
         browser.setHtml(html)
         layout.addWidget(browser)
 
@@ -696,23 +579,33 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
-    def fetch_all_rss_feeds(self) -> None:
-        """Starts background worker to fetch all RSS feeds."""
-        self.fetch_btn.setEnabled(False)
-        self.status_bar.showMessage("Fetching RSS feeds in background...")
+    def find_jobs(self) -> None:
+        """Validates AI pipeline prerequisites, then starts the background Find Jobs worker."""
+        error = check_pipeline_prerequisites()
+        if error:
+            QMessageBox.critical(self, "Cannot Run Find Jobs", error)
+            return
 
-        self.worker = RSSFetchWorker()
+        self.find_jobs_btn.setEnabled(False)
+        self.status_bar.showMessage("Finding jobs: fetching, extracting, matching, and tailoring in background...")
+
+        self.worker = FindJobsWorker()
         self.worker.progress.connect(self.status_bar.showMessage)
-        self.worker.finished.connect(self.on_fetch_finished)
+        self.worker.finished.connect(self.on_find_jobs_finished)
         self.worker.start()
 
-    def on_fetch_finished(self, total_fetched: int, total_new: int) -> None:
-        """Handles background fetch completion."""
-        self.fetch_btn.setEnabled(True)
+    def on_find_jobs_finished(
+        self, total_fetched: int, total_new: int, total_matched: int, total_tailored: int, total_errors: int
+    ) -> None:
+        """Handles background Find Jobs pipeline completion."""
+        self.find_jobs_btn.setEnabled(True)
         self.load_jobs()
-        msg = f"Fetch complete! Items fetched: {total_fetched}, New jobs added: {total_new}."
+        msg = (
+            f"Find Jobs complete! Fetched: {total_fetched}, New: {total_new}, "
+            f"Matched: {total_matched}, Tailored: {total_tailored}, Errors: {total_errors}."
+        )
         self.status_bar.showMessage(msg)
-        QMessageBox.information(self, "RSS Feed Sync Complete", msg)
+        QMessageBox.information(self, "Find Jobs Complete", msg)
 
     def show_about_dialog(self) -> None:
         """Shows About dialog."""
