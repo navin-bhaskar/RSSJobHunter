@@ -3,7 +3,9 @@ Main Application Window for RSS Job Hunter with Menu Bar (Settings -> RSS Feeds)
 """
 
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction
@@ -37,8 +39,9 @@ from database import (
     create_job,
     add_note,
     get_all_rss_sources,
-    update_job_structured_output,
     update_job_match_score,
+    update_job_match_result,
+    update_job_tailored_resume,
 )
 from tools import fetch_rss_feed, get_universal_id
 from gui.rss_feed_dialog import RSSFeedDialog
@@ -149,6 +152,156 @@ class MatchResumeWorker(QThread):
             self.finished.emit(self.job["id"], result, "")
         except Exception as e:
             self.finished.emit(self.job["id"], None, str(e))
+
+
+def check_pipeline_prerequisites() -> Optional[str]:
+    """
+    Validates required AI pipeline configuration before starting FindJobsWorker.
+
+    Returns:
+        An error message string if a prerequisite is missing, or None if all
+        checks pass.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or api_key == "your_openai_api_key_here":
+        return (
+            "OPENAI_API_KEY is not configured. Please set a valid OpenAI API key "
+            "in your .env file before running Find Jobs."
+        )
+
+    resume_path = os.getenv("RESUME_PATH") or os.getenv("RESUME", "resume.pdf")
+    if not Path(resume_path).exists():
+        return (
+            f"Resume file not found at '{resume_path}'. Please configure RESUME_PATH "
+            "in your .env file and ensure the PDF exists before running Find Jobs."
+        )
+
+    return None
+
+
+class FindJobsWorker(QThread):
+    """
+    Worker thread that fetches RSS feeds, deduplicates new items in code, extracts
+    structured job data via the LLM rss_agent, scores each new job against the
+    candidate's resume via the LLM matcher_agent, and generates a tailored resume
+    via the LLM tailor_agent for any job whose score clears MATCH_SCORE_THRESHOLD.
+    """
+
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(int, int, int, int, int)
+    # total_fetched, total_new, total_matched, total_tailored, total_errors
+
+    def run(self) -> None:
+        from agents import RSSJobAgent, ResumeAgent, MatcherAgent, TailorAgent
+
+        total_fetched = 0
+        total_new = 0
+        total_matched = 0
+        total_tailored = 0
+        total_errors = 0
+
+        try:
+            threshold = int(os.getenv("MATCH_SCORE_THRESHOLD", "70"))
+        except ValueError:
+            threshold = 70
+
+        self.progress.emit("Parsing candidate resume...")
+        try:
+            resume_schema, _from_cache = ResumeAgent().parse_resume()
+        except Exception as e:
+            self.progress.emit(f"Failed to parse resume: {e}")
+            self.finished.emit(0, 0, 0, 0, 1)
+            return
+
+        sources = get_all_rss_sources()
+        if not sources:
+            self.progress.emit("No RSS sources configured. Please add one in Settings -> RSS Feeds.")
+            self.finished.emit(0, 0, 0, 0, 0)
+            return
+
+        existing_jobs = get_all_jobs()
+        existing_uids = {j.get("universal_id") for j in existing_jobs if j.get("universal_id")}
+        existing_links = {j.get("job_link") for j in existing_jobs if j.get("job_link")}
+
+        rss_agent = RSSJobAgent()
+        matcher_agent = MatcherAgent()
+        tailor_agent = TailorAgent()
+
+        for source in sources:
+            source_id = source["id"]
+            source_name = source.get("name") or source.get("link")
+            self.progress.emit(f"Fetching RSS feed: {source_name}...")
+
+            try:
+                feed = fetch_rss_feed(source["link"], max_items=20)
+            except Exception as e:
+                self.progress.emit(f"Error fetching '{source_name}': {e}")
+                total_errors += 1
+                continue
+
+            items = feed.get("items", [])
+            total_fetched += len(items)
+
+            for item in items:
+                link = item.get("link", "")
+                uid = item.get("universal_id") or get_universal_id(link)
+
+                if uid in existing_uids or link in existing_links:
+                    continue
+
+                existing_uids.add(uid)
+                existing_links.add(link)
+
+                self.progress.emit(f"Processing new job: {item.get('title') or link}")
+
+                try:
+                    structured = rss_agent.process_feed_item(item, rss_source_id=source_id)
+                    job_id = create_job(
+                        job_link=structured.canonical_url or link,
+                        job_description=structured.clean_description or "",
+                        status="pending",
+                        job_match_score=0,
+                        application_link=structured.application_url or link,
+                        rss_source_id=source_id,
+                        universal_id=uid,
+                        structured_output=structured.to_json(),
+                    )
+                    total_new += 1
+                except Exception as e:
+                    self.progress.emit(f"Extraction failed for '{link}': {e}")
+                    total_errors += 1
+                    continue
+
+                try:
+                    match_result = matcher_agent.evaluate_match(
+                        resume_data=resume_schema,
+                        job_description=structured.clean_description or "",
+                        job_title=structured.title,
+                        company_name=structured.company,
+                    )
+                    update_job_match_score(job_id, match_result.match_score)
+                    update_job_match_result(job_id, match_result.model_dump_json())
+                    total_matched += 1
+                except Exception as e:
+                    self.progress.emit(f"ATS matching failed for job #{job_id}: {e}")
+                    total_errors += 1
+                    continue
+
+                if match_result.match_score >= threshold:
+                    try:
+                        tailored = tailor_agent.tailor_resume(
+                            resume_data=resume_schema,
+                            job_description=structured.clean_description or "",
+                            job_title=structured.title,
+                            company_name=structured.company,
+                        )
+                        update_job_tailored_resume(job_id, tailored.model_dump_json())
+                        total_tailored += 1
+                    except Exception as e:
+                        self.progress.emit(f"Resume tailoring failed for job #{job_id}: {e}")
+                        total_errors += 1
+
+        self.finished.emit(total_fetched, total_new, total_matched, total_tailored, total_errors)
 
 
 class MainWindow(QMainWindow):
