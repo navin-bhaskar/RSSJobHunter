@@ -42,6 +42,10 @@ def init_db(db_name: str = DB_NAME, schema_file: str = SCHEMA_FILE) -> None:
             cursor.execute("ALTER TABLE jobs ADD COLUMN match_result TEXT;")
         if "tailored_resume" not in columns:
             cursor.execute("ALTER TABLE jobs ADD COLUMN tailored_resume TEXT;")
+        if "is_deleted" not in columns:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")
+        if "tailored_resume_pdf_path" not in columns:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN tailored_resume_pdf_path TEXT;")
 
         conn.commit()
 
@@ -136,10 +140,19 @@ def get_all_jobs(
     status_filter: Optional[str] = None,
     search: Optional[str] = None,
     rss_source_id: Optional[int] = None,
+    include_deleted: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Retrieves all jobs with optional status filter, search, or rss_source_id filter."""
+    """Retrieves all jobs with optional status filter, search, or rss_source_id filter.
+
+    Soft-deleted jobs (is_deleted = 1) are excluded unless include_deleted=True, so a
+    removed job stays out of the UI but is still counted for Find Jobs dedup (it won't
+    be re-fetched/re-created).
+    """
     sql = "SELECT * FROM jobs WHERE 1=1"
     params: List[Any] = []
+
+    if not include_deleted:
+        sql += " AND is_deleted = 0"
 
     if status_filter and status_filter.lower() != "all":
         sql += " AND status = ?"
@@ -239,6 +252,16 @@ def update_job_tailored_resume(job_id: int, tailored_resume: str) -> bool:
         return cursor.rowcount > 0
 
 
+def update_job_tailored_resume_pdf_path(job_id: int, pdf_path: str) -> bool:
+    """Updates only the tailored_resume_pdf_path column for a job record."""
+    sql = "UPDATE jobs SET tailored_resume_pdf_path = ? WHERE id = ?"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (pdf_path, job_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def update_job_description(job_id: int, job_description: str) -> bool:
     """Updates only the job_description column for a job record."""
     sql = "UPDATE jobs SET job_description = ? WHERE id = ?"
@@ -260,10 +283,22 @@ def update_job_match_score(job_id: int, job_match_score: int) -> bool:
 
 
 def delete_job(job_id: int) -> bool:
-    """Deletes a job record (and associated notes via CASCADE)."""
+    """Hard-deletes a job record (and associated notes via CASCADE). Used to roll back
+    incomplete/dangling rows (e.g. a cancelled Find Jobs run), not for user removals."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def soft_delete_job(job_id: int) -> bool:
+    """Marks a job as deleted without removing it, so it disappears from the UI but is
+    still recognized as 'seen' and won't be re-fetched/re-created by Find Jobs."""
+    sql = "UPDATE jobs SET is_deleted = 1 WHERE id = ?"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (job_id,))
         conn.commit()
         return cursor.rowcount > 0
 

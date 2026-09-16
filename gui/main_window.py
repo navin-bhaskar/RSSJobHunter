@@ -5,6 +5,7 @@ Main Application Window for RSS Job Hunter with Menu Bar (Settings -> RSS Feeds)
 import html
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, List
@@ -38,168 +39,117 @@ from database import (
     get_all_jobs,
     get_job,
     get_job_with_notes,
-    create_job,
     add_note,
     get_all_rss_sources,
-    update_job_match_score,
-    update_job_match_result,
     update_job_tailored_resume,
+    update_job_tailored_resume_pdf_path,
+    delete_job,
+    soft_delete_job,
 )
-from tools import fetch_rss_feed, get_universal_id
+from tools import render_resume_pdf, ResumePDFError
 from gui.rss_feed_dialog import RSSFeedDialog
+from gui.processing_dialog import ProcessingDialog
+from pipeline import (
+    check_llm_prerequisites,
+    check_pipeline_prerequisites,
+    run_find_jobs_pipeline,
+)
+
+RESUME_PDF_OUTPUT_DIR = Path("generated_resumes")
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-def check_pipeline_prerequisites() -> Optional[str]:
-    """
-    Validates required AI pipeline configuration before starting FindJobsWorker.
-
-    Returns:
-        An error message string if a prerequisite is missing, or None if all
-        checks pass.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key or api_key == "your_openai_api_key_here":
-        return (
-            "OPENAI_API_KEY is not configured. Please set a valid OpenAI API key "
-            "in your .env file before running Find Jobs."
-        )
-
-    resume_path = os.getenv("RESUME_PATH") or os.getenv("RESUME", "resume.pdf")
-    if not Path(resume_path).exists():
-        return (
-            f"Resume file not found at '{resume_path}'. Please configure RESUME_PATH "
-            "in your .env file and ensure the PDF exists before running Find Jobs."
-        )
-
-    return None
-
-
 class FindJobsWorker(QThread):
     """
-    Worker thread that fetches RSS feeds, deduplicates new items in code, extracts
-    structured job data via the LLM rss_agent, scores each new job against the
-    candidate's resume via the LLM matcher_agent, and generates a tailored resume
-    via the LLM tailor_agent for any job whose score clears MATCH_SCORE_THRESHOLD.
+    Worker thread that drives run_find_jobs_pipeline() (see pipeline.py) in the
+    background and re-emits its progress as Qt signals for the GUI.
+
+    Cancellation is cooperative (QThread.requestInterruption()): the pipeline checks
+    it between feeds, between items, and immediately after a job row is created.
     """
 
     progress = pyqtSignal(str)
-    finished = pyqtSignal(int, int, int, int, int)
-    # total_fetched, total_new, total_matched, total_tailored, total_errors
+    job_saved = pyqtSignal()
+    finished = pyqtSignal(int, int, int, int, int, bool)
+    # total_fetched, total_new, total_matched, total_tailored, total_errors, cancelled
 
     def run(self) -> None:
-        from agents import RSSJobAgent, ResumeAgent, MatcherAgent, TailorAgent
+        result = run_find_jobs_pipeline(
+            progress_callback=self.progress.emit,
+            on_job_saved=self.job_saved.emit,
+            should_cancel=self.isInterruptionRequested,
+        )
+        self.finished.emit(
+            result.total_fetched,
+            result.total_new,
+            result.total_matched,
+            result.total_tailored,
+            result.total_errors,
+            result.cancelled,
+        )
 
-        total_fetched = 0
-        total_new = 0
-        total_matched = 0
-        total_tailored = 0
-        total_errors = 0
 
-        try:
-            threshold = int(os.getenv("MATCH_SCORE_THRESHOLD", "70"))
-        except ValueError:
-            threshold = 70
+class TailorResumeWorker(QThread):
+    """
+    Worker thread that tailors the candidate's resume for a single selected job
+    (regardless of its match score) and renders the result to a PDF file, saving
+    the PDF's path back onto the job record.
+    """
 
-        self.progress.emit("Parsing candidate resume...")
-        try:
-            resume_schema, _from_cache = ResumeAgent().parse_resume()
-        except Exception as e:
-            self.progress.emit(f"Failed to parse resume: {e}")
-            self.finished.emit(0, 0, 0, 0, 1)
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(int, bool, str)
+    # job_id, success, pdf_path (on success) or error message (on failure)
+
+    def __init__(self, job_id: int):
+        super().__init__()
+        self.job_id = job_id
+
+    def run(self) -> None:
+        from agents import ResumeAgent, TailorAgent
+
+        job = get_job(self.job_id)
+        if not job:
+            self.finished.emit(self.job_id, False, f"Job #{self.job_id} no longer exists.")
             return
 
-        sources = get_all_rss_sources()
-        if not sources:
-            self.progress.emit("No RSS sources configured. Please add one in Settings -> RSS Feeds.")
-            self.finished.emit(0, 0, 0, 0, 0)
-            return
-
-        existing_jobs = get_all_jobs()
-        existing_uids = {j.get("universal_id") for j in existing_jobs if j.get("universal_id")}
-        existing_links = {j.get("job_link") for j in existing_jobs if j.get("job_link")}
-
-        rss_agent = RSSJobAgent()
-        matcher_agent = MatcherAgent()
-        tailor_agent = TailorAgent()
-
-        for source in sources:
-            source_id = source["id"]
-            source_name = source.get("name") or source.get("link")
-            self.progress.emit(f"Fetching RSS feed: {source_name}...")
-
+        job_title = None
+        company_name = None
+        job_description = job.get("job_description") or ""
+        structured_raw = job.get("structured_output")
+        if structured_raw:
             try:
-                feed = fetch_rss_feed(source["link"], max_items=20)
-            except Exception as e:
-                self.progress.emit(f"Error fetching '{source_name}': {e}")
-                total_errors += 1
-                continue
+                structured = json.loads(structured_raw)
+                job_title = structured.get("title")
+                company_name = structured.get("company")
+                job_description = structured.get("clean_description") or job_description
+            except Exception:
+                pass
 
-            items = feed.get("items", [])
-            total_fetched += len(items)
+        try:
+            self.progress.emit("Parsing candidate resume...")
+            resume_schema, _from_cache = ResumeAgent().parse_resume()
 
-            for item in items:
-                link = item.get("link", "")
-                uid = item.get("universal_id") or get_universal_id(link)
+            self.progress.emit(f"Tailoring resume for job #{self.job_id}...")
+            tailored = TailorAgent().tailor_resume(
+                resume_data=resume_schema,
+                job_description=job_description,
+                job_title=job_title,
+                company_name=company_name,
+            )
+            update_job_tailored_resume(self.job_id, tailored.model_dump_json())
 
-                if uid in existing_uids or link in existing_links:
-                    continue
+            self.progress.emit("Rendering resume PDF...")
+            output_path = RESUME_PDF_OUTPUT_DIR / f"job_{self.job_id}.pdf"
+            pdf_path = render_resume_pdf(tailored, output_path)
+            update_job_tailored_resume_pdf_path(self.job_id, pdf_path)
 
-                existing_uids.add(uid)
-                existing_links.add(link)
-
-                self.progress.emit(f"Processing new job: {item.get('title') or link}")
-
-                try:
-                    structured = rss_agent.process_feed_item(item, rss_source_id=source_id)
-                    job_id = create_job(
-                        job_link=structured.canonical_url or link,
-                        job_description=structured.clean_description or "",
-                        status="pending",
-                        job_match_score=0,
-                        application_link=structured.application_url or link,
-                        rss_source_id=source_id,
-                        universal_id=uid,
-                        structured_output=structured.to_json(),
-                    )
-                    total_new += 1
-                except Exception as e:
-                    self.progress.emit(f"Extraction failed for '{link}': {e}")
-                    total_errors += 1
-                    continue
-
-                try:
-                    match_result = matcher_agent.evaluate_match(
-                        resume_data=resume_schema,
-                        job_description=structured.clean_description or "",
-                        job_title=structured.title,
-                        company_name=structured.company,
-                    )
-                    update_job_match_score(job_id, match_result.match_score)
-                    update_job_match_result(job_id, match_result.model_dump_json())
-                    total_matched += 1
-                except Exception as e:
-                    self.progress.emit(f"ATS matching failed for job #{job_id}: {e}")
-                    total_errors += 1
-                    continue
-
-                if match_result.match_score >= threshold:
-                    try:
-                        tailored = tailor_agent.tailor_resume(
-                            resume_data=resume_schema,
-                            job_description=structured.clean_description or "",
-                            job_title=structured.title,
-                            company_name=structured.company,
-                        )
-                        update_job_tailored_resume(job_id, tailored.model_dump_json())
-                        total_tailored += 1
-                    except Exception as e:
-                        self.progress.emit(f"Resume tailoring failed for job #{job_id}: {e}")
-                        total_errors += 1
-
-        self.finished.emit(total_fetched, total_new, total_matched, total_tailored, total_errors)
+            self.finished.emit(self.job_id, True, pdf_path)
+        except ResumePDFError as e:
+            self.finished.emit(self.job_id, False, f"Resume was tailored but PDF rendering failed: {e}")
+        except Exception as e:
+            self.finished.emit(self.job_id, False, str(e))
 
 
 class MainWindow(QMainWindow):
@@ -307,11 +257,11 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         self.jobs_table = QTableWidget()
-        self.jobs_table.setColumnCount(6)
+        self.jobs_table.setColumnCount(5)
         self.jobs_table.setHorizontalHeaderLabels(
-            ["ID", "Job Link", "Status", "Match Score", "Tailored", "RSS Source"]
+            ["Job Link", "Status", "Match Score", "Tailored", "RSS Source"]
         )
-        self.jobs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.jobs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.jobs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.jobs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.jobs_table.itemSelectionChanged.connect(self.on_job_selected)
@@ -342,6 +292,28 @@ class MainWindow(QMainWindow):
         self.view_report_btn.setEnabled(False)
         self.view_report_btn.clicked.connect(self.view_ai_report)
         ai_actions_layout.addWidget(self.view_report_btn)
+
+        self.tailor_resume_btn = QPushButton("📝 Tailor Resume (PDF)")
+        self.tailor_resume_btn.setEnabled(False)
+        self.tailor_resume_btn.clicked.connect(self.tailor_resume_for_selected_job)
+        ai_actions_layout.addWidget(self.tailor_resume_btn)
+
+        self.open_resume_pdf_btn = QPushButton("📂 Open PDF")
+        self.open_resume_pdf_btn.setEnabled(False)
+        self.open_resume_pdf_btn.clicked.connect(self.open_tailored_resume_pdf)
+        ai_actions_layout.addWidget(self.open_resume_pdf_btn)
+
+        self.show_resume_pdf_in_explorer_btn = QPushButton("🗂 Show in Explorer")
+        self.show_resume_pdf_in_explorer_btn.setEnabled(False)
+        self.show_resume_pdf_in_explorer_btn.clicked.connect(self.show_tailored_resume_pdf_in_explorer)
+        ai_actions_layout.addWidget(self.show_resume_pdf_in_explorer_btn)
+
+        self.remove_job_btn = QPushButton("🗑 Remove")
+        self.remove_job_btn.setEnabled(False)
+        self.remove_job_btn.setStyleSheet("color: #ff5555;")
+        self.remove_job_btn.clicked.connect(self.remove_selected_job)
+        ai_actions_layout.addWidget(self.remove_job_btn)
+
         ai_actions_layout.addStretch()
         job_info_layout.addLayout(ai_actions_layout)
 
@@ -401,39 +373,35 @@ class MainWindow(QMainWindow):
             has_match = bool(job.get("match_result"))
             is_tailored = bool(job.get("tailored_resume"))
 
-            id_item = QTableWidgetItem(str(job["id"]))
-            id_item.setData(Qt.ItemDataRole.EditRole, job["id"])
-
             link_item = QTableWidgetItem(job.get("job_link") or "")
+            link_item.setData(Qt.ItemDataRole.UserRole, job["id"])
             status_item = QTableWidgetItem(job.get("status") or "pending")
 
             score_item = QTableWidgetItem(str(score))
             score_item.setData(Qt.ItemDataRole.EditRole, score)
-            if has_match:
-                bg, fg = self._score_band_colors(score)
-                score_item.setBackground(bg)
-                score_item.setForeground(fg)
 
             tailored_item = QTableWidgetItem("Yes" if is_tailored else "No")
 
             source_name = rss_sources.get(job.get("rss_source_id"), "Direct / Manual")
             source_item = QTableWidgetItem(source_name)
 
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             score_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             tailored_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            self.jobs_table.setItem(row_idx, 0, id_item)
-            self.jobs_table.setItem(row_idx, 1, link_item)
-            self.jobs_table.setItem(row_idx, 2, status_item)
-            self.jobs_table.setItem(row_idx, 3, score_item)
-            self.jobs_table.setItem(row_idx, 4, tailored_item)
-            self.jobs_table.setItem(row_idx, 5, source_item)
+            row_items = [link_item, status_item, score_item, tailored_item, source_item]
+            if has_match:
+                bg, fg = self._score_band_colors(score)
+                for item in row_items:
+                    item.setBackground(bg)
+                    item.setForeground(fg)
+
+            for col, item in enumerate(row_items):
+                self.jobs_table.setItem(row_idx, col, item)
 
         self.jobs_table.setSortingEnabled(True)
         if not self._initial_sort_applied:
-            self.jobs_table.sortItems(3, Qt.SortOrder.DescendingOrder)
+            self.jobs_table.sortItems(2, Qt.SortOrder.DescendingOrder)
             self._initial_sort_applied = True
         self.status_bar.showMessage(f"Loaded {len(jobs)} job records.")
 
@@ -445,10 +413,14 @@ class MainWindow(QMainWindow):
             self.job_desc_browser.clear()
             self.notes_list.clear()
             self.view_report_btn.setEnabled(False)
+            self.remove_job_btn.setEnabled(False)
+            self.tailor_resume_btn.setEnabled(False)
+            self.open_resume_pdf_btn.setEnabled(False)
+            self.show_resume_pdf_in_explorer_btn.setEnabled(False)
             return
 
         row = selected_ranges[0].topRow()
-        job_id = int(self.jobs_table.item(row, 0).text())
+        job_id = self.jobs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
 
         job = get_job_with_notes(job_id)
         if not job:
@@ -482,11 +454,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 structured_html = ""
 
+        pdf_path = job.get("tailored_resume_pdf_path")
+        pdf_line = f"<b>Tailored Resume PDF:</b> {html.escape(pdf_path)}<br>" if pdf_path else ""
+
         content_html = (
             f"<b>Job Link:</b> <a href='{link}'>{link}</a><br>"
             f"<b>Status:</b> {job.get('status')}<br>"
             f"<b>Match Score:</b> {job.get('job_match_score')}<br>"
             f"<b>RSS Source:</b> {html.escape(str(source_str)) if source_str else 'N/A'}<br>"
+            f"{pdf_line}"
             f"<hr>"
             f"{structured_html}"
             f"<h3>Job Description</h3>"
@@ -494,6 +470,10 @@ class MainWindow(QMainWindow):
         )
         self.job_desc_browser.setHtml(content_html)
         self.view_report_btn.setEnabled(bool(job.get("match_result")))
+        self.remove_job_btn.setEnabled(True)
+        self.tailor_resume_btn.setEnabled(True)
+        self.open_resume_pdf_btn.setEnabled(bool(pdf_path))
+        self.show_resume_pdf_in_explorer_btn.setEnabled(bool(pdf_path))
 
         # Populate Notes List
         self.notes_list.clear()
@@ -509,7 +489,7 @@ class MainWindow(QMainWindow):
             return
 
         row = selected_ranges[0].topRow()
-        job_id = int(self.jobs_table.item(row, 0).text())
+        job_id = self.jobs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
 
         text, ok = QInputDialog.getText(self, "Add Job Note", "Enter note text:")
         if ok and text.strip():
@@ -522,9 +502,123 @@ class MainWindow(QMainWindow):
         selected_ranges = self.jobs_table.selectedRanges()
         if not selected_ranges:
             return None
-        row = selected_ranges[0].topRow()
-        item = self.jobs_table.item(row, 0)
-        return int(item.text()) if item else None
+        item = self.jobs_table.item(selected_ranges[0].topRow(), 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def remove_selected_job(self) -> None:
+        """Soft-deletes the selected job: hides it from the table without deleting its
+        record, so a future Find Jobs run won't re-fetch and re-populate it."""
+        job_id = self._get_selected_job_id()
+        if job_id is None:
+            QMessageBox.warning(self, "Selection Error", "Please select a job first.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Remove",
+            f"Remove job #{job_id} from the list? It won't be re-added by future Find Jobs runs.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        soft_delete_job(job_id)
+        self.load_jobs()
+        self.on_job_selected()
+        self.status_bar.showMessage(f"Job #{job_id} removed.")
+
+    def _select_job_row(self, job_id: int) -> None:
+        """Re-selects the table row for the given job_id, e.g. after a load_jobs() refresh.
+
+        Always explicitly refreshes the Job Details pane afterward rather than relying on
+        itemSelectionChanged: Qt does not fire that signal when the row we're re-selecting
+        has the same index as the row that was already selected (e.g. a job's sort position
+        is unchanged after tailoring its resume), which would otherwise leave the pane
+        showing stale data.
+        """
+        for row in range(self.jobs_table.rowCount()):
+            item = self.jobs_table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == job_id:
+                self.jobs_table.selectRow(row)
+                break
+        self.on_job_selected()
+
+    def tailor_resume_for_selected_job(self) -> None:
+        """Tailors the candidate's resume for the selected job (regardless of its match
+        score) and renders it to a PDF file in the background."""
+        job_id = self._get_selected_job_id()
+        if job_id is None:
+            QMessageBox.warning(self, "Selection Error", "Please select a job first.")
+            return
+
+        if getattr(self, "tailor_worker", None) is not None and self.tailor_worker.isRunning():
+            self.status_bar.showMessage("A resume is already being tailored — please wait for it to finish.")
+            return
+
+        error = check_llm_prerequisites()
+        if error:
+            QMessageBox.critical(self, "Cannot Tailor Resume", error)
+            return
+
+        self.tailor_resume_btn.setEnabled(False)
+        self.tailor_resume_btn.setText("Tailoring...")
+
+        self.tailor_worker = TailorResumeWorker(job_id)
+        self.tailor_worker.progress.connect(self.status_bar.showMessage)
+        self.tailor_worker.finished.connect(self.on_tailor_resume_finished)
+        self.tailor_worker.start()
+
+    def on_tailor_resume_finished(self, job_id: int, success: bool, message: str) -> None:
+        """Handles TailorResumeWorker completion: refreshes the table/details and re-enables the button."""
+        self.tailor_resume_btn.setEnabled(True)
+        self.tailor_resume_btn.setText("📝 Tailor Resume (PDF)")
+
+        if not success:
+            self.status_bar.showMessage(f"Tailoring failed for job #{job_id}.")
+            QMessageBox.critical(self, "Tailor Resume Failed", message)
+            return
+
+        self.status_bar.showMessage(f"Resume PDF ready for job #{job_id}: {message}")
+        self.load_jobs()
+        self._select_job_row(job_id)
+
+    def _get_selected_resume_pdf_path(self) -> Optional[str]:
+        """Returns the selected job's tailored resume PDF path if it exists on disk,
+        else warns the user and returns None."""
+        job_id = self._get_selected_job_id()
+        if job_id is None:
+            return None
+
+        job = get_job(job_id)
+        pdf_path = job.get("tailored_resume_pdf_path") if job else None
+        if not pdf_path or not Path(pdf_path).exists():
+            QMessageBox.warning(
+                self, "PDF Not Found", "No tailored resume PDF found for this job. Try tailoring it again."
+            )
+            return None
+        return pdf_path
+
+    def open_tailored_resume_pdf(self) -> None:
+        """Opens the selected job's tailored resume PDF with the OS default viewer."""
+        pdf_path = self._get_selected_resume_pdf_path()
+        if not pdf_path:
+            return
+
+        try:
+            os.startfile(pdf_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open PDF: {e}")
+
+    def show_tailored_resume_pdf_in_explorer(self) -> None:
+        """Opens Windows Explorer with the selected job's tailored resume PDF pre-selected."""
+        pdf_path = self._get_selected_resume_pdf_path()
+        if not pdf_path:
+            return
+
+        try:
+            subprocess.run(["explorer", f"/select,{Path(pdf_path).resolve()}"])
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open Explorer: {e}")
 
     def view_ai_report(self) -> None:
         """Displays the stored ATS match breakdown and tailored resume for the selected job, read-only."""
@@ -594,9 +688,11 @@ class MainWindow(QMainWindow):
         """Collects a Find Jobs progress message for the completion report, and shows it live."""
         self._run_log.append(message)
         self.status_bar.showMessage(message)
+        if getattr(self, "processing_dialog", None) is not None:
+            self.processing_dialog.add_message(message)
 
     def find_jobs(self) -> None:
-        """Validates AI pipeline prerequisites, then starts the background Find Jobs worker."""
+        """Validates AI pipeline prerequisites, then runs the background Find Jobs worker behind a modal progress dialog."""
         if getattr(self, "worker", None) is not None and self.worker.isRunning():
             self.status_bar.showMessage("Find Jobs is already running — please wait for it to finish.")
             return
@@ -612,30 +708,39 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Finding jobs: fetching, extracting, matching, and tailoring in background...")
 
         self.worker = FindJobsWorker()
+        self.processing_dialog = ProcessingDialog(self)
+        self.processing_dialog.cancel_requested.connect(self.worker.requestInterruption)
+
         self.worker.progress.connect(self._on_worker_progress)
+        self.worker.job_saved.connect(self.load_jobs)
         self.worker.finished.connect(self.on_find_jobs_finished)
         self.worker.start()
 
+        self.processing_dialog.exec()
+
     def on_find_jobs_finished(
-        self, total_fetched: int, total_new: int, total_matched: int, total_tailored: int, total_errors: int
+        self,
+        total_fetched: int,
+        total_new: int,
+        total_matched: int,
+        total_tailored: int,
+        total_errors: int,
+        cancelled: bool,
     ) -> None:
-        """Handles background Find Jobs pipeline completion."""
+        """Handles background Find Jobs pipeline completion (or cancellation)."""
         self.find_jobs_btn.setEnabled(True)
         self.find_jobs_action.setEnabled(True)
         self.load_jobs()
+
+        prefix = "Cancelled." if cancelled else "Find Jobs complete!"
         msg = (
-            f"Find Jobs complete! Fetched: {total_fetched}, New: {total_new}, "
+            f"{prefix} Fetched: {total_fetched}, New: {total_new}, "
             f"Matched: {total_matched}, Tailored: {total_tailored}, Errors: {total_errors}."
         )
         self.status_bar.showMessage(msg)
 
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Information)
-        msg_box.setWindowTitle("Find Jobs Complete")
-        msg_box.setText(msg)
-        if self._run_log:
-            msg_box.setDetailedText("\n".join(self._run_log))
-        msg_box.exec()
+        if getattr(self, "processing_dialog", None) is not None:
+            self.processing_dialog.mark_finished(msg)
 
     def show_about_dialog(self) -> None:
         """Shows About dialog."""

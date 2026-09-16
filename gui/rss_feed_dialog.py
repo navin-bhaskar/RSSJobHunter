@@ -25,6 +25,7 @@ from database import (
     get_all_rss_sources,
     delete_rss_source,
     get_rss_source_by_link,
+    update_rss_source,
 )
 from tools import fetch_rss_feed
 
@@ -83,12 +84,15 @@ class RSSFeedDialog(QDialog):
         table_layout = QVBoxLayout(table_group)
 
         self.sources_table = QTableWidget()
-        self.sources_table.setColumnCount(4)
-        self.sources_table.setHorizontalHeaderLabels(["ID", "Name", "Feed Link", "Created At"])
+        self.sources_table.setColumnCount(2)
+        self.sources_table.setHorizontalHeaderLabels(["Name", "Feed Link"])
         self.sources_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.sources_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.sources_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.sources_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.sources_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.sources_table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed
+        )
+        self.sources_table.itemChanged.connect(self._on_item_changed)
 
         table_layout.addWidget(self.sources_table)
 
@@ -114,21 +118,52 @@ class RSSFeedDialog(QDialog):
 
     def load_rss_sources(self) -> None:
         """Loads and populates all RSS sources from the database table."""
-        sources = get_all_rss_sources()
-        self.sources_table.setRowCount(len(sources))
+        self.sources_table.blockSignals(True)
+        try:
+            sources = get_all_rss_sources()
+            self.sources_table.setRowCount(len(sources))
 
-        for row_idx, source in enumerate(sources):
-            id_item = QTableWidgetItem(str(source["id"]))
-            name_item = QTableWidgetItem(source.get("name") or "Unnamed Feed")
-            link_item = QTableWidgetItem(source.get("link") or "")
-            created_item = QTableWidgetItem(str(source.get("created_at") or ""))
+            for row_idx, source in enumerate(sources):
+                name_item = QTableWidgetItem(source.get("name") or "Unnamed Feed")
+                link_item = QTableWidgetItem(source.get("link") or "")
+                name_item.setData(Qt.ItemDataRole.UserRole, source["id"])
 
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.sources_table.setItem(row_idx, 0, name_item)
+                self.sources_table.setItem(row_idx, 1, link_item)
+        finally:
+            self.sources_table.blockSignals(False)
 
-            self.sources_table.setItem(row_idx, 0, id_item)
-            self.sources_table.setItem(row_idx, 1, name_item)
-            self.sources_table.setItem(row_idx, 2, link_item)
-            self.sources_table.setItem(row_idx, 3, created_item)
+    def _source_id_for_row(self, row: int) -> Optional[int]:
+        """Returns the RSS source id stored on the given table row, if any."""
+        name_item = self.sources_table.item(row, 0)
+        return name_item.data(Qt.ItemDataRole.UserRole) if name_item else None
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Persists an in-place edit to a Name or Feed Link cell back to the database."""
+        row = item.row()
+        source_id = self._source_id_for_row(row)
+        if source_id is None:
+            return
+
+        name = self.sources_table.item(row, 0).text().strip()
+        link = self.sources_table.item(row, 1).text().strip()
+
+        if not link:
+            QMessageBox.warning(self, "Validation Error", "Feed link cannot be empty.")
+            self.load_rss_sources()
+            return
+
+        existing = get_rss_source_by_link(link)
+        if existing and existing["id"] != source_id:
+            QMessageBox.warning(self, "Duplicate Error", "An RSS feed with this link already exists!")
+            self.load_rss_sources()
+            return
+
+        try:
+            update_rss_source(source_id, link=link, name=name if name else None)
+        except Exception as err:
+            QMessageBox.critical(self, "Database Error", f"Failed to update RSS source: {err}")
+            self.load_rss_sources()
 
     def add_source(self) -> None:
         """Handles adding a new RSS feed source to the database."""
@@ -144,10 +179,7 @@ class RSSFeedDialog(QDialog):
             return
 
         try:
-            source_id = create_rss_source(link=link, name=name if name else None)
-            QMessageBox.information(
-                self, "Success", f"RSS Source added successfully (ID: {source_id})!"
-            )
+            create_rss_source(link=link, name=name if name else None)
             self.name_input.clear()
             self.link_input.clear()
             self.load_rss_sources()
@@ -162,7 +194,7 @@ class RSSFeedDialog(QDialog):
             selected_rows = self.sources_table.selectedItems()
             if selected_rows:
                 row = selected_rows[0].row()
-                link = self.sources_table.item(row, 2).text()
+                link = self.sources_table.item(row, 1).text()
 
         if not link:
             QMessageBox.warning(
@@ -194,13 +226,13 @@ class RSSFeedDialog(QDialog):
             return
 
         row = selected_ranges[0].topRow()
-        source_id = int(self.sources_table.item(row, 0).text())
-        source_name = self.sources_table.item(row, 1).text()
+        source_id = self._source_id_for_row(row)
+        source_name = self.sources_table.item(row, 0).text()
 
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
-            f"Are you sure you want to delete RSS Source '{source_name}' (ID: {source_id})?",
+            f"Are you sure you want to delete RSS Source '{source_name}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 

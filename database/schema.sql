@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     structured_output TEXT,
     match_result TEXT,
     tailored_resume TEXT,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    tailored_resume_pdf_path TEXT,
     FOREIGN KEY (rss_source_id) REFERENCES rss_sources(id) ON DELETE SET NULL
 );
 

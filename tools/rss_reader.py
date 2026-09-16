@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 import time
 from urllib.parse import urlparse
@@ -14,6 +15,22 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import feedparser
 import requests
+
+# Remotive's RSS/Atom feed endpoints sit behind a Cloudflare JS challenge and always
+# return HTTP 403 to automated fetchers, even with browser TLS impersonation. Their
+# public JSON API serves the same job postings without the challenge, so feed URLs
+# in this shape are transparently rewritten before fetching.
+REMOTIVE_FEED_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.)?remotive\.com/remote-jobs/feed/([\w-]+)/?$", re.IGNORECASE
+)
+
+
+def _rewrite_remotive_feed_url(url: str) -> str:
+    """Rewrites a Cloudflare-protected Remotive RSS feed URL to its public JSON API equivalent."""
+    match = REMOTIVE_FEED_URL_PATTERN.match(url.strip())
+    if match:
+        return f"https://remotive.com/api/remote-jobs?category={match.group(1)}"
+    return url
 
 
 def get_universal_id(guid_or_url: str) -> str:
@@ -68,6 +85,8 @@ class RSSReader:
         """
         if not url or not isinstance(url, str):
             raise ValueError("A valid URL string must be provided.")
+
+        url = _rewrite_remotive_feed_url(url)
 
         parsed_url = urlparse(url)
         if not parsed_url.scheme or not parsed_url.netloc:

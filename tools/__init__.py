@@ -18,6 +18,7 @@ from .rss_reader import (
     get_rss_job_items,
     get_universal_id,
 )
+from .resume_pdf import ResumePDFError, render_resume_pdf
 
 __all__ = [
     "PDFReader",
@@ -36,4 +37,6 @@ __all__ = [
     "parse_rss",
     "get_rss_job_items",
     "get_universal_id",
+    "ResumePDFError",
+    "render_resume_pdf",
 ]
