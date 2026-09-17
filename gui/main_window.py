@@ -43,6 +43,7 @@ from database import (
     get_all_rss_sources,
     update_job_tailored_resume,
     update_job_tailored_resume_pdf_path,
+    update_job_status,
     delete_job,
     soft_delete_job,
 )
@@ -155,6 +156,8 @@ class TailorResumeWorker(QThread):
 class MainWindow(QMainWindow):
     """Main Dashboard Window for RSS Job Hunter."""
 
+    JOB_STATUSES = ["pending", "applied", "interviewing", "selected", "rejected", "withdrawn"]
+
     SCORE_COLORS = {
         "strong": (QColor("#2e7d32"), QColor("#ffffff")),    # 80-100, white on green
         "good": (QColor("#f9a825"), QColor("#1a1a1a")),       # 65-79, dark text on amber (contrast fix)
@@ -228,7 +231,7 @@ class MainWindow(QMainWindow):
 
         toolbar_layout.addWidget(QLabel("Filter Status:"))
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["All", "pending", "applied", "interviewing", "rejected"])
+        self.status_filter.addItems(["All"] + self.JOB_STATUSES)
         self.status_filter.currentTextChanged.connect(self.load_jobs)
         toolbar_layout.addWidget(self.status_filter)
 
@@ -283,6 +286,16 @@ class MainWindow(QMainWindow):
         self.job_title_label.setWordWrap(True)
         job_info_layout.addWidget(self.job_title_label)
 
+        status_row_layout = QHBoxLayout()
+        status_row_layout.addWidget(QLabel("Status:"))
+        self.job_status_combo = QComboBox()
+        self.job_status_combo.addItems(self.JOB_STATUSES)
+        self.job_status_combo.setEnabled(False)
+        self.job_status_combo.currentTextChanged.connect(self.on_job_status_changed)
+        status_row_layout.addWidget(self.job_status_combo)
+        status_row_layout.addStretch()
+        job_info_layout.addLayout(status_row_layout)
+
         self.job_desc_browser = QTextBrowser()
         self.job_desc_browser.setOpenExternalLinks(True)
         job_info_layout.addWidget(self.job_desc_browser)
@@ -296,6 +309,11 @@ class MainWindow(QMainWindow):
         self.tailor_resume_btn = QPushButton("📝 Tailor Resume (PDF)")
         self.tailor_resume_btn.setEnabled(False)
         self.tailor_resume_btn.clicked.connect(self.tailor_resume_for_selected_job)
+        # Fixed width (sized for the longer of its two labels) so swapping to "Tailoring..."
+        # doesn't change the button's size hint and reflow the rest of this row.
+        metrics = self.tailor_resume_btn.fontMetrics()
+        label_width = max(metrics.horizontalAdvance(t) for t in ("📝 Tailor Resume (PDF)", "Tailoring..."))
+        self.tailor_resume_btn.setMinimumWidth(label_width + 40)
         ai_actions_layout.addWidget(self.tailor_resume_btn)
 
         self.open_resume_pdf_btn = QPushButton("📂 Open PDF")
@@ -417,6 +435,7 @@ class MainWindow(QMainWindow):
             self.tailor_resume_btn.setEnabled(False)
             self.open_resume_pdf_btn.setEnabled(False)
             self.show_resume_pdf_in_explorer_btn.setEnabled(False)
+            self.job_status_combo.setEnabled(False)
             return
 
         row = selected_ranges[0].topRow()
@@ -469,9 +488,19 @@ class MainWindow(QMainWindow):
             f"<p>{html.escape(job.get('job_description') or 'No description text provided.')}</p>"
         )
         self.job_desc_browser.setHtml(content_html)
+
+        current_status = job.get("status") or "pending"
+        self.job_status_combo.blockSignals(True)
+        if self.job_status_combo.findText(current_status) < 0:
+            self.job_status_combo.addItem(current_status)
+        self.job_status_combo.setCurrentText(current_status)
+        self.job_status_combo.blockSignals(False)
+        self.job_status_combo.setEnabled(True)
+
         self.view_report_btn.setEnabled(bool(job.get("match_result")))
         self.remove_job_btn.setEnabled(True)
-        self.tailor_resume_btn.setEnabled(True)
+        tailor_running = getattr(self, "tailor_worker", None) is not None and self.tailor_worker.isRunning()
+        self.tailor_resume_btn.setEnabled(not tailor_running)
         self.open_resume_pdf_btn.setEnabled(bool(pdf_path))
         self.show_resume_pdf_in_explorer_btn.setEnabled(bool(pdf_path))
 
@@ -496,6 +525,18 @@ class MainWindow(QMainWindow):
             add_note(job_id, text.strip())
             self.on_job_selected()
             self.status_bar.showMessage("Note added successfully.")
+
+    def on_job_status_changed(self, new_status: str) -> None:
+        """Persists the selected job's status change from the details pane combo box
+        and refreshes the table row (and its score-band color) to reflect it."""
+        job_id = self._get_selected_job_id()
+        if job_id is None:
+            return
+
+        update_job_status(job_id, new_status)
+        self.load_jobs()
+        self._select_job_row(job_id)
+        self.status_bar.showMessage(f"Job #{job_id} status updated to '{new_status}'.")
 
     def _get_selected_job_id(self) -> Optional[int]:
         """Returns the ID of the currently selected job in the table, or None."""

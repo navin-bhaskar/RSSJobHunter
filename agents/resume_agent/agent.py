@@ -29,13 +29,18 @@ def _get_openai_agents_sdk():
         import agents as _sdk
         agent_cls = _sdk.Agent
         runner_cls = _sdk.Runner
-        return agent_cls, runner_cls
+        model_settings_cls = _sdk.ModelSettings
+        return agent_cls, runner_cls, model_settings_cls
     finally:
         sys.path = orig_path
         if saved_agents_mod is not None:
             sys.modules["agents"] = saved_agents_mod
 
-Agent, Runner = _get_openai_agents_sdk()
+Agent, Runner, ModelSettings = _get_openai_agents_sdk()
+
+# Bounds each individual LLM call attempt; the openai client's own default (600s,
+# 2 retries) otherwise leaves a stalled network call looking hung for up to ~20 minutes.
+MODEL_CALL_TIMEOUT_SECONDS = 60
 
 
 
@@ -127,6 +132,7 @@ class ResumeAgent:
             instructions=system_prompt,
             model=self.model,
             output_type=ATSResumeSchema,
+            model_settings=ModelSettings(timeout=MODEL_CALL_TIMEOUT_SECONDS),
         )
 
         # Execute agent synchronously via OpenAI Agents SDK Runner

@@ -282,6 +282,16 @@ def update_job_match_score(job_id: int, job_match_score: int) -> bool:
         return cursor.rowcount > 0
 
 
+def update_job_status(job_id: int, status: str) -> bool:
+    """Updates only the status column for a job record."""
+    sql = "UPDATE jobs SET status = ? WHERE id = ?"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, (status, job_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def delete_job(job_id: int) -> bool:
     """Hard-deletes a job record (and associated notes via CASCADE). Used to roll back
     incomplete/dangling rows (e.g. a cancelled Find Jobs run), not for user removals."""
