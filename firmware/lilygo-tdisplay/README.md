@@ -7,17 +7,29 @@ the Python side (`agent_tools/mqtt.py`):
 
 - **Topic:** `MQTT_TOPIC` env var, default `jobhunter/notifications`
 - **Payload:** JSON `{"title": str | null, "message": str | null, "url": str | null, "score": int | null}`
-- **Broker:** Bevywise CrystalMQ Cloud (`crystalmq.bevywise.com`), plain MQTT on port 1883, username/password auth
+- **Broker:** any standard MQTT broker with username/password auth — host, port,
+  and TLS are all configurable (`MQTT_BROKER_HOST` / `MQTT_BROKER_PORT` /
+  `MQTT_USE_TLS` on the Python side, matched by the `MQTT_*` defines in
+  `secrets.h` on the firmware side). Options that work well for this project:
+  - **[Eclipse Mosquitto](https://mosquitto.org/)** — self-hosted (e.g. on a
+    Raspberry Pi or small VPS), free, full control.
+  - **[HiveMQ Cloud](https://www.hivemq.com/mqtt-cloud-broker/)** — free
+    tier, TLS-only (port 8883).
+  - **[EMQX Cloud](https://www.emqx.com/en/cloud)** — free tier, TLS-only
+    (port 8883).
+  - **[Bevywise CrystalMQ Cloud](https://crystalmq.bevywise.com/)** — free
+    tier, plain MQTT on port 1883 (no TLS); this is what the reference
+    firmware config in `secrets.h.example` uses.
 
-## Projects
+## What it does
 
-- **`notification_display/`** — the pager firmware: idle status screen
-  (WiFi/MQTT indicators + breathing "waiting" dot), and an animated
-  slide-in card with a color-coded score badge when a notification arrives,
-  matching the score bands from `gui/main_window.py`'s `SCORE_COLORS`
-  (>=80 green, 65-79 amber, 50-64 orange, <50 red).
+The `notification_display/` sketch shows an idle status screen (WiFi/MQTT
+indicators + breathing "waiting" dot), then an animated slide-in card with a
+color-coded score badge when a notification arrives, matching the score
+bands from `gui/main_window.py`'s `SCORE_COLORS` (>=80 green, 65-79 amber,
+50-64 orange, <50 red).
 
-## TFT_eSPI setup (required for `notification_display/`)
+## TFT_eSPI setup
 
 `TFT_eSPI` needs to be told which display driver/pinout to use for the
 T-Display, via a compile-time config rather than a sketch-level setting:

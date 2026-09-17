@@ -25,7 +25,7 @@
     - PubSubClient (Nick O'Leary)
 
   Setup: copy secrets.h.example to secrets.h in this folder and fill in your
-  WiFi credentials (MQTT_* already match the verified broker).
+  WiFi credentials MQTT_* from MQTT broker.
 */
 
 #include <math.h>
