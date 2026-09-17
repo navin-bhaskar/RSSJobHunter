@@ -19,7 +19,9 @@ dashboard, or headless as a polling background service.
 4. **Tailor** — any job that clears `MATCH_SCORE_THRESHOLD` gets a tailored
    resume automatically generated (`TailorAgent`) and rendered to PDF.
 5. **Notify** — optionally pushes a notification (Pushover and/or MQTT, e.g.
-   to a LilyGO T-Display pager — see `firmware/`) when a strong match is found.
+   to a LilyGO T-Display pager — see
+   [`firmware/lilygo-tdisplay/README.md`](firmware/lilygo-tdisplay/README.md))
+   when a strong match is found.
 
 All of this is driven from one shared pipeline (`pipeline.py`) used by both
 the GUI and the headless runner, so results are identical either way.
@@ -68,7 +70,8 @@ the GUI and the headless runner, so results are identical either way.
    - `MQTT_BROKER_HOST` / `MQTT_USERNAME` / `MQTT_PASSWORD` (+ optional
      `MQTT_BROKER_PORT`, `MQTT_TOPIC`, `MQTT_USE_TLS`) — enables MQTT
      notifications, e.g. to drive a small pager display. See
-     `firmware/lilygo-tdisplay/README.md` for a matching ESP32 build.
+     [`firmware/lilygo-tdisplay/README.md`](firmware/lilygo-tdisplay/README.md)
+     for a matching ESP32 build.
 
 3. Place your resume PDF at the path you configured (default:
    `resume.pdf` in the project root).
@@ -100,10 +103,19 @@ This opens the dashboard window:
   - 🟡 65-79 — good match
   - 🟠 50-64 — moderate match
   - 🔴 0-49 — low match
-  - Filter by status (pending / applied / interviewing / rejected) or search
-    by title, link, or description.
+  - Filter by status (pending / applied / interviewing / selected / rejected /
+    withdrawn) or search by title, link, or description.
 - Select a job to view its details, the AI Report (score + rationale), and
   (once tailored) open/export the tailored resume PDF, or add your own notes.
+  Its status can also be changed from this panel — updates save to the
+  database immediately and reflect back in the jobs table.
+
+  ![Job details panel](docs/images/job_details.png)
+
+  Clicking **View AI Report** shows the full match breakdown: matching
+  skills, missing skills, key strengths, and gap areas.
+
+  ![AI Report dialog](docs/images/ai_report_sample.png)
 
 ### Headless runner
 
@@ -130,7 +142,8 @@ disabled, the pipeline itself isn't affected either way).
 MQTT notifications publish a JSON payload (`title`, `message`, `url`,
 `score`) to `MQTT_TOPIC`, intended for a small subscriber device to render.
 A reference ESP32 (LilyGO T-Display) firmware implementation that renders
-these as an animated notification card lives in `firmware/lilygo-tdisplay/`.
+these as an animated notification card lives in
+[`firmware/lilygo-tdisplay/`](firmware/lilygo-tdisplay/README.md).
 
 ## Data
 

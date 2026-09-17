@@ -28,3 +28,6 @@ resume.pdf
 
 # Generated tailored resume PDFs (personal data, not source)
 generated_resumes/
+
+# Superpowers skill planning/spec docs (dev-workflow artifacts, not source)
+docs/superpowers/
