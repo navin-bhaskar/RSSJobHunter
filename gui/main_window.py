@@ -687,6 +687,9 @@ class MainWindow(QMainWindow):
             return "".join(f"<li>{html.escape(str(i))}</li>" for i in items) or "<li>None</li>"
 
         exp_eval = match_result.get("experience_evaluation") or {}
+        loc_eval = match_result.get("location_evaluation") or {}
+        loc_icon = "✅" if loc_eval.get("is_location_compatible") else "⚠️"
+        loc_requirement = loc_eval.get("job_location_requirement") or "Not specified"
         report_html = (
             f"<h2>{match_result.get('match_score')}/100 &mdash; {html.escape(str(match_result.get('fit_level') or ''))}</h2>"
             f"<p>{html.escape(str(match_result.get('executive_summary') or ''))}</p>"
@@ -696,6 +699,9 @@ class MainWindow(QMainWindow):
             f"<h3>Gap Areas</h3><ul>{_list_html(match_result.get('gap_areas', []))}</ul>"
             f"<h3>Tailoring Recommendations</h3><ul>{_list_html(match_result.get('tailoring_recommendations', []))}</ul>"
             f"<h3>Experience Evaluation</h3><p>{html.escape(str(exp_eval.get('commentary') or ''))}</p>"
+            f"<h3>Location Compatibility {loc_icon}</h3>"
+            f"<p><b>Job Requirement:</b> {html.escape(str(loc_requirement))}</p>"
+            f"<p>{html.escape(str(loc_eval.get('commentary') or ''))}</p>"
         )
 
         if tailored_resume:

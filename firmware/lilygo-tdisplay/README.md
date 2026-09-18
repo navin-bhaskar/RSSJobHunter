@@ -24,10 +24,11 @@ the Python side (`agent_tools/mqtt.py`):
 ## What it does
 
 The `notification_display/` sketch shows an idle status screen (WiFi/MQTT
-indicators + breathing "waiting" dot), then an animated slide-in card with a
-color-coded score badge when a notification arrives, matching the score
-bands from `gui/main_window.py`'s `SCORE_COLORS` (>=80 green, 65-79 amber,
-50-64 orange, <50 red).
+indicators + breathing "waiting" dot), then an animated slide-in card with
+the job title, a color-coded score badge matching the score bands from
+`gui/main_window.py`'s `SCORE_COLORS` (>=80 green, 65-79 amber, 50-64
+orange, <50 red), and the payload's `message` field (company name, set in
+`pipeline.py`) below a divider line.
 
 ## TFT_eSPI setup
 

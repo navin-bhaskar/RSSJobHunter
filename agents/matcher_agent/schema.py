@@ -37,6 +37,20 @@ class ExperienceEvaluation(BaseModel):
     )
 
 
+class LocationEvaluation(BaseModel):
+    """Analysis of whether the candidate's location satisfies the job's location/timezone/work-authorization requirement."""
+    job_location_requirement: Optional[str] = Field(
+        None,
+        description="The job's stated location, timezone, or work-authorization requirement (e.g. 'Remote (US only)', 'Worldwide')",
+    )
+    is_location_compatible: bool = Field(
+        description="True if the candidate's location plausibly satisfies the job's location/timezone/work-authorization requirement",
+    )
+    commentary: str = Field(
+        description="Explanation of any location, timezone, or work-authorization mismatch and its impact on fit",
+    )
+
+
 class ATSMatchResult(BaseModel):
     """
     Complete structured ATS matching evaluation between candidate resume and job description.
@@ -69,6 +83,7 @@ class ATSMatchResult(BaseModel):
         description="Skills, tools, or domain requirements from the job description not evident or weak in the resume",
     )
     experience_evaluation: ExperienceEvaluation
+    location_evaluation: LocationEvaluation
     key_strengths: List[str] = Field(
         default_factory=list,
         description="Top 3-5 strongest selling points and competitive advantages of the candidate for this specific role",

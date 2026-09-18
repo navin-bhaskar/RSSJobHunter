@@ -217,6 +217,8 @@ def run_find_jobs_pipeline(
                         job_description=structured.clean_description or "",
                         job_title=structured.title,
                         company_name=structured.company,
+                        job_location=structured.location,
+                        is_remote=structured.is_remote,
                     )
                     update_job_match_score(job_id, match_result.match_score)
                     update_job_match_result(job_id, match_result.model_dump_json())

@@ -3,11 +3,12 @@
 
   Idle screen shows WiFi/MQTT status and a breathing "waiting" dot. When a
   job-match notification arrives over MQTT, a card slides in from the right
-  with the job title and a color-coded score badge (matching the score bands
+  with the job title, a color-coded score badge (matching the score bands
   used in gui/main_window.py: >=80 green, 65-79 amber, 50-64 orange, <50 red),
-  the badge does a small bounce, then the card holds for 10s before returning
-  to idle. A new notification arriving mid-animation/hold interrupts and
-  restarts immediately with the new job.
+  and the payload's "message" field (company name, from pipeline.py) below a
+  divider line; the badge does a small bounce, then the card holds for 10s
+  before returning to idle. A new notification arriving mid-animation/hold
+  interrupts and restarts immediately with the new job.
 
   The idle screen also tracks a running count of good matches (every MQTT
   notification is already a match that cleared MATCH_SCORE_THRESHOLD on the
@@ -76,6 +77,7 @@ unsigned long lastFrameMs = 0;
 
 struct JobNotification {
   String title = "";
+  String message = "";
   int score = -1;
 };
 JobNotification currentJob;
@@ -116,9 +118,12 @@ float bounceScale(float t) {
 }
 
 // ---------- Text wrapping (greedy word-wrap to 2 lines, ellipsis on overflow) ----------
+// Used for both the job title (font 2) and the message line (font 1) below it;
+// caller must set the desired font before calling, since wrapping measures
+// against the sprite's currently active font.
 
-void wrapTitle(const String &title, String &line1, String &line2, int maxWidth) {
-  String remaining = title;
+void wrapText(const String &text, String &line1, String &line2, int maxWidth) {
+  String remaining = text;
   remaining.trim();
 
   int fitEnd = 0;
@@ -220,14 +225,26 @@ void drawNotificationFrame(int cardX, float badgeScale) {
   sprite.setTextFont(4);
   sprite.drawString(currentJob.score >= 0 ? String(currentJob.score) : "--", badgeCx, badgeCy);
 
-  int textMaxWidth = cardW - 70;
-  String line1, line2;
+  int titleMaxWidth = cardW - 70;
+  String titleLine1, titleLine2;
   sprite.setTextFont(2);
-  wrapTitle(currentJob.title, line1, line2, textMaxWidth);
+  wrapText(currentJob.title, titleLine1, titleLine2, titleMaxWidth);
   sprite.setTextDatum(TL_DATUM);
   sprite.setTextColor(TFT_WHITE, cardBg);
-  sprite.drawString(line1, cardX + 12, cardY + 16);
-  sprite.drawString(line2, cardX + 12, cardY + 38);
+  sprite.drawString(titleLine1, cardX + 12, cardY + 16);
+  sprite.drawString(titleLine2, cardX + 12, cardY + 38);
+
+  if (currentJob.message.length() > 0) {
+    sprite.drawFastHLine(cardX + 12, cardY + 58, cardW - 24, TFT_DARKGREY);
+
+    int msgMaxWidth = cardW - 24;
+    String msgLine1, msgLine2;
+    sprite.setTextFont(1);
+    wrapText(currentJob.message, msgLine1, msgLine2, msgMaxWidth);
+    sprite.setTextColor(TFT_LIGHTGREY, cardBg);
+    sprite.drawString(msgLine1, cardX + 12, cardY + 66);
+    sprite.drawString(msgLine2, cardX + 12, cardY + 78);
+  }
 
   sprite.pushSprite(0, 0);
 }
@@ -303,6 +320,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   }
 
   currentJob.title = String((const char*)(doc["title"] | "Untitled job"));
+  currentJob.message = String((const char*)(doc["message"] | ""));
   currentJob.score = doc["score"] | -1;
   goodMatchCount++;
 

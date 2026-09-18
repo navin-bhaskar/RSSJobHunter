@@ -73,6 +73,8 @@ class MatcherAgent:
         job_description: str,
         job_title: Optional[str] = None,
         company_name: Optional[str] = None,
+        job_location: Optional[str] = None,
+        is_remote: Optional[bool] = None,
     ) -> ATSMatchResult:
         """
         Executes ATS matching analysis between candidate resume and job description.
@@ -82,6 +84,9 @@ class MatcherAgent:
             job_description: Full job description text.
             job_title: Optional title of the position.
             company_name: Optional hiring company name.
+            job_location: Optional location/timezone/work-authorization requirement stated
+                by the posting (e.g. "Remote (US only)"), from RSSJobAgent's structured output.
+            is_remote: Optional flag for whether the posting allows remote work at all.
 
         Returns:
             ATSMatchResult instance containing score (0-100), breakdown, and recommendations.
@@ -95,10 +100,13 @@ class MatcherAgent:
         # Format resume data as JSON string for LLM input
         if isinstance(resume_data, ATSResumeSchema):
             resume_json_str = json.dumps(resume_data.model_dump(), indent=2, ensure_ascii=False)
+            candidate_location = resume_data.contact_info.location
         elif isinstance(resume_data, dict):
             resume_json_str = json.dumps(resume_data, indent=2, ensure_ascii=False)
+            candidate_location = (resume_data.get("contact_info") or {}).get("location")
         else:
             resume_json_str = str(resume_data)
+            candidate_location = None
 
         system_prompt = (
             "You are an elite Applicant Tracking System (ATS) algorithm and Principal Technical Recruiter. "
@@ -109,18 +117,31 @@ class MatcherAgent:
             "- 75-89: Strong fit; satisfies 80%+ requirements, minor gaps in secondary nice-to-haves.\n"
             "- 60-74: Moderate fit; solid transferable foundation but missing several core technologies or domain depth.\n"
             "- <60: Significant skill/experience disconnect.\n\n"
+            "Location/timezone/work-authorization fit is a significant scoring factor, not a minor nice-to-have: "
+            "many jobs labeled 'remote' still require the candidate to be physically located in a specific "
+            "country, region, or timezone band (for legal work authorization or working-hours overlap). If the "
+            "job posting states or implies such a requirement and the candidate's location does not plausibly "
+            "satisfy it, treat this as a material gap and reduce match_score accordingly, even if the "
+            "candidate's skills are an otherwise excellent fit. If the job is open to any location, or no "
+            "location requirement is stated, this should not penalize the score.\n\n"
             "Provide insightful, high-value feedback including matching skills, missing skills, "
-            "experience seniority evaluation, and high-impact resume tailoring recommendations."
+            "experience seniority evaluation, location/timezone compatibility, and high-impact resume "
+            "tailoring recommendations."
         )
 
         user_prompt = (
             f"=== TARGET JOB POSTING ===\n"
             f"Role Title: {job_title or 'Not specified'}\n"
-            f"Company: {company_name or 'Not specified'}\n\n"
+            f"Company: {company_name or 'Not specified'}\n"
+            f"Location/Timezone Requirement: {job_location or 'Not specified'}\n"
+            f"Remote-eligible: {is_remote if is_remote is not None else 'Not specified'}\n\n"
             f"Job Description:\n{job_description}\n\n"
             f"=== CANDIDATE RESUME DATA (STRUCTURED ATS FORMAT) ===\n"
+            f"Candidate Location: {candidate_location or 'Not specified'}\n\n"
             f"{resume_json_str}\n\n"
-            f"Evaluate the candidate against this job description and produce the structured ATSMatchResult."
+            f"Evaluate the candidate against this job description and produce the structured ATSMatchResult, "
+            f"including an explicit location_evaluation comparing the candidate's location against the job's "
+            f"location/timezone requirement above."
         )
 
         agent = Agent(
@@ -150,6 +171,8 @@ def match_resume_to_job(
     job_description: str,
     job_title: Optional[str] = None,
     company_name: Optional[str] = None,
+    job_location: Optional[str] = None,
+    is_remote: Optional[bool] = None,
 ) -> ATSMatchResult:
     """
     Convenience function to run the ATS Matcher Agent.
@@ -160,6 +183,8 @@ def match_resume_to_job(
         job_description=job_description,
         job_title=job_title,
         company_name=company_name,
+        job_location=job_location,
+        is_remote=is_remote,
     )
 
 

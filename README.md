@@ -95,6 +95,18 @@ This opens the dashboard window:
 
   ![Settings -> RSS Feeds dialog](docs/images/adding_rss_feeds.png)
 
+  A few remote job boards that publish public RSS feeds, to get you started:
+
+  | Source | Feed URL |
+  | --- | --- |
+  | We Work Remotely (all jobs) | `https://weworkremotely.com/remote-jobs.rss` |
+  | We Work Remotely (programming) | `https://weworkremotely.com/categories/remote-programming-jobs.rss` |
+  | Remotive (all jobs) | `https://remotive.com/remote-jobs/feed` |
+
+  Most job boards' category/search pages expose their own RSS feed too (often
+  linked at the bottom of the page, or by appending `.rss`/`/feed` to the
+  URL) — add any feed URL here, it doesn't have to be from this list.
+
 - **Find Jobs** (toolbar button, or File → Find Jobs, `Ctrl+R`) — runs one
   full fetch → extract → match → tailor pass across all configured feeds and
   populates the jobs table as results come in.
